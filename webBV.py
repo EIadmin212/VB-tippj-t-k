@@ -72,18 +72,17 @@ def torna_elkezdodott(data):
                 legkorabbi_kezdes = dt
         except ValueError:
             continue
-    if legkorabbi_kezdes and datetime.datetime.now() > legkorabbi_kezdes:
+    if legkorabbi_kezdes and (datetime.datetime.utcnow() + datetime.timedelta(hours=2)) > legkorabbi_kezdes:
         return True
     return False
 
 def feldolgoz_meccsek_api(matches_data, data):
-    """Közös funkció az API válasz feldolgozására és az időzóna javítására (+2 óra)"""
     for m in matches_data:
         m_id = str(m["id"])
         hazai = m.get("homeTeam", {}).get("name") or "TBD"
         vendeg = m.get("awayTeam", {}).get("name") or "TBD"
         
-        # Időzóna javítása: UTC-ből Közép-európai idő (+2 óra hozzáadása)
+        # Időzóna javítása: UTC-ből Közép-európai idő (+2 óra)
         dt = datetime.datetime.strptime(m["utcDate"], "%Y-%m-%dT%H:%M:%SZ")
         dt_local = dt + datetime.timedelta(hours=2)
         kezdes_str = dt_local.strftime("%Y-%m-%d %H:%M")
@@ -98,7 +97,7 @@ def feldolgoz_meccsek_api(matches_data, data):
         else:
             data["meccsek"][m_id]["hazai"] = hazai
             data["meccsek"][m_id]["vendeg"] = vendeg
-            data["meccsek"][m_id]["kezdes"] = kezdes_str # Frissíti a helyes időpontra
+            data["meccsek"][m_id]["kezdes"] = kezdes_str
             if score.get("home") is not None:
                 data["meccsek"][m_id]["eredmeny_hazai"] = score.get("home")
                 data["meccsek"][m_id]["eredmeny_vendeg"] = score.get("away")
@@ -106,7 +105,9 @@ def feldolgoz_meccsek_api(matches_data, data):
 
 def frissit_api_okosan(data):
     if not API_KEY.strip(): return False
-    most = datetime.datetime.now()
+    
+    # Felhőszerver védelme: fixen a magyar idő kiszámolása (UTC + 2 óra)
+    most = datetime.datetime.utcnow() + datetime.timedelta(hours=2)
     utolso_frissites = datetime.datetime.strptime(data["last_api_update"], "%Y-%m-%d %H:%M:%S")
     
     if (most - utolso_frissites).total_seconds() >= 60:
@@ -138,7 +139,6 @@ if st.session_state['user'] is None:
     tab_login, tab_reg = st.tabs(["🔑 Bejelentkezés", "📝 Regisztráció"])
     
     with tab_login:
-       
         with st.form("login_form"):
             login_user = st.text_input("Felhasználónév")
             login_pw = st.text_input("Jelszó", type="password")
@@ -241,7 +241,6 @@ else:
             }
             
             if tippelheto_meccsek:
-                # 🛠️ JAVÍTÁS: A selectbox kikerült az űrlapból, így a váltás azonnal frissíti a mezőket!
                 valasztott_meccs = st.selectbox("Válassz meccset a tippeléshez:", options=list(tippelheto_meccsek.keys()), format_func=lambda x: tippelheto_meccsek[x])
                 
                 elozo_h, elozo_v = 0, 0
@@ -355,7 +354,7 @@ else:
         
         st.dataframe(df_ranglista, use_container_width=True)
 
-    # --- 4. FÜL: ADMIN ÉS EREDMÉNYEK (CSAK ADMIN LÁTHATJA) ---
+    # --- 4. FÜL: ADMIN ÉS EREDMÉNYEK ---
     with tab_admin:
         if active_user == "Admin":
             st.header("⚙️ Adminisztrációs Vezérlőpult")
@@ -372,18 +371,17 @@ else:
             
             with col_exp:
                 st.markdown("#### Adatok Letöltése (Export)")
-                st.write("Mentsd le a teljes adatbázist a saját gépedre biztonsági másolatként!")
                 json_string = json.dumps(data, indent=4, ensure_ascii=False)
                 st.download_button(
                     label="⬇️ Adatbázis Letöltése (.json)",
-                    file_name=f"tippjatek_backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.json",
+                    file_name=f"tippjatek_backup_{(datetime.datetime.utcnow() + datetime.timedelta(hours=2)).strftime('%Y%m%d_%H%M')}.json",
                     mime="application/json",
                     data=json_string
                 )
 
             with col_imp:
                 st.markdown("#### Adatok Visszatöltése (Import)")
-                st.warning("⚠️ **Figyelem:** Az importálás felülírja a jelenlegi adatokat (a jelszavakat és a tippeket is)!")
+                st.warning("⚠️ **Figyelem:** Az importálás felülírja a jelenlegi adatokat!")
                 uploaded_file = st.file_uploader("Válassz ki egy korábbi mentést (.json)", type="json")
                 
                 if uploaded_file is not None:
@@ -405,7 +403,11 @@ else:
                 response = requests.get("https://api.football-data.org/v4/competitions/WC/matches", headers={"X-Auth-Token": API_KEY})
                 if response.status_code == 200:
                     data = feldolgoz_meccsek_api(response.json().get("matches", []), data)
-                    data["last_api_update"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    
+                    # Idő frissítése gombnyomáskor is
+                    most = datetime.datetime.utcnow() + datetime.timedelta(hours=2)
+                    data["last_api_update"] = most.strftime("%Y-%m-%d %H:%M:%S")
+                    
                     save_data(data)
                     st.success("Meccsek sikeresen szinkronizálva!")
                     st.rerun()
@@ -417,7 +419,6 @@ else:
             aktiv_meccsek = {m_id: f"{m['hazai']} - {m['vendeg']} ({m['kezdes']})" for m_id, m in data["meccsek"].items()}
             
             if aktiv_meccsek:
-                # 🛠️ JAVÍTÁS ITT IS: A selectbox kikerült az űrlapból
                 admin_meccs = st.selectbox("Válaszd ki a meccset:", options=list(aktiv_meccsek.keys()), format_func=lambda x: aktiv_meccsek[x])
                 with st.form("manual_result_form"):
                     col_a1, col_a2 = st.columns(2)
