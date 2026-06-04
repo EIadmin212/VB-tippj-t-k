@@ -131,7 +131,7 @@ if st.session_state['user'] is None:
     tab_login, tab_reg = st.tabs(["🔑 Bejelentkezés", "📝 Regisztráció"])
     
     with tab_login:
-        st.info("💡 **Adminisztrátori belépés:** Felhasználónév: `Admin`, Jelszó: `admin123`")
+        
         with st.form("login_form"):
             login_user = st.text_input("Felhasználónév")
             login_pw = st.text_input("Jelszó", type="password")
