@@ -182,11 +182,9 @@ else:
     
     active_user = st.session_state['user']
     
-    # Felső sáv
     col1, col2 = st.columns([4, 1])
     with col1:
         st.title(f"⚽ VB Tippjáték - Üdv, {active_user}! 🏆")
-        
         utolso_friss = data.get('last_api_update', '2000-01-01 00:00:00')
         ha_nincs = "Még nem történt letöltés" if "2000" in utolso_friss else utolso_friss
         st.caption(f"🔄 **Eredmények utoljára szinkronizálva:** {ha_nincs}")
@@ -241,7 +239,6 @@ else:
             if tippelheto_meccsek:
                 valasztott_meccs = st.selectbox("Válassz meccset a tippeléshez:", options=list(tippelheto_meccsek.keys()), format_func=lambda x: tippelheto_meccsek[x])
                 
-                # BUGFIX: Dinamikus kulcsok bevezetése (a meccs ID-ja alapján), így minden meccs egyedi widgetet kap, sosem ragad be!
                 elozo_h = data["jatekosok"][active_user]["tippek"].get(valasztott_meccs, {}).get("hazai", 0)
                 elozo_v = data["jatekosok"][active_user]["tippek"].get(valasztott_meccs, {}).get("vendeg", 0)
 
@@ -357,14 +354,20 @@ else:
             st.header("⚙️ Adminisztrációs Vezérlőpult")
             st.info("Itt tudod menedzselni a meccseket, a bónuszokat, a felhasználókat és a biztonsági mentéseket.")
             
-            # --- ÚJ: FELHASZNÁLÓK KEZELÉSE (TÖRLÉS / MÓDOSÍTÁS) ---
+            st.subheader("👥 Regisztrált Játékosok")
+            regisztraltak = data.get("regisztralt_nevek", [])
+            st.write(f"Összesen {len(regisztraltak)} játékos van a rendszerben.")
+            st.code(", ".join(regisztraltak))
+            st.divider()
+
+            # --- FELHASZNÁLÓK KEZELÉSE 3 OSZLOPBAN ---
             st.subheader("👥 Felhasználók Kezelése")
+            col_u1, col_u2, col_u3 = st.columns(3)
             
-            col_u1, col_u2 = st.columns(2)
             with col_u1:
                 st.markdown("#### 🗑️ Felhasználó Törlése")
                 del_opciok = ["Válassz..."] + [u for u in data["regisztralt_nevek"] if u != "Admin"]
-                del_user = st.selectbox("Törlendő játékos:", del_opciok)
+                del_user = st.selectbox("Törlendő játékos:", del_opciok, key="del_user_select")
                 if st.button("Törlés Véglegesítése"):
                     if del_user != "Válassz...":
                         data["regisztralt_nevek"].remove(del_user)
@@ -377,9 +380,9 @@ else:
                         st.warning("Válassz ki egy felhasználót a törléshez!")
 
             with col_u2:
-                st.markdown("#### ✏️ Játékos Tippjének Felülírása")
+                st.markdown("#### ✏️ Meccs Tipp Felülírása")
                 edit_opciok = ["Válassz..."] + [u for u in data["regisztralt_nevek"] if u != "Admin"]
-                edit_user = st.selectbox("Játékos kiválasztása:", edit_opciok)
+                edit_user = st.selectbox("Játékos kiválasztása:", edit_opciok, key="edit_user_match")
                 
                 if edit_user != "Válassz..." and data["meccsek"]:
                     edit_meccs = st.selectbox("Melyik meccs tippjét?", options=list(data["meccsek"].keys()), format_func=lambda x: f"{data['meccsek'][x]['hazai']} - {data['meccsek'][x]['vendeg']}")
@@ -400,7 +403,26 @@ else:
                                 save_data(data)
                                 st.success(f"{edit_user} tippje sikeresen módosítva!")
                                 st.rerun()
-            
+
+            with col_u3:
+                st.markdown("#### 🏆 Bónusz Tipp Felülírása")
+                edit_bonus_user = st.selectbox("Játékos kiválasztása:", edit_opciok, key="edit_user_bonus")
+                
+                if edit_bonus_user != "Válassz...":
+                    curr_gy = data["jatekosok"][edit_bonus_user].get("bonusz_gyoztes", "")
+                    curr_gk = data["jatekosok"][edit_bonus_user].get("bonusz_golkiraly", "")
+                    
+                    with st.form("admin_edit_bonus"):
+                        new_gy = st.text_input("Győztes tipp:", value=curr_gy, key=f"bgy_{edit_bonus_user}")
+                        new_gk = st.text_input("Gólkirály tipp:", value=curr_gk, key=f"bgk_{edit_bonus_user}")
+                        
+                        if st.form_submit_button("Bónusz Felülírása"):
+                            data["jatekosok"][edit_bonus_user]["bonusz_gyoztes"] = new_gy.strip()
+                            data["jatekosok"][edit_bonus_user]["bonusz_golkiraly"] = new_gk.strip()
+                            save_data(data)
+                            st.success(f"{edit_bonus_user} bónusz tippje módosítva!")
+                            st.rerun()
+
             st.divider()
 
             # --- EXPORT / IMPORT ---
@@ -436,14 +458,27 @@ else:
                             
             st.divider()
             
-            # --- EREDMÉNYEK BEÍRÁSA (BUGFIXED) ---
+            st.subheader("🌍 Kézi API Szinkronizáció")
+            if st.button("Meccsek lekérése azonnal"):
+                response = requests.get("https://api.football-data.org/v4/competitions/WC/matches", headers={"X-Auth-Token": API_KEY})
+                if response.status_code == 200:
+                    data = feldolgoz_meccsek_api(response.json().get("matches", []), data)
+                    
+                    most = datetime.datetime.utcnow() + datetime.timedelta(hours=2)
+                    data["last_api_update"] = most.strftime("%Y-%m-%d %H:%M:%S")
+                    
+                    save_data(data)
+                    st.success("Meccsek sikeresen szinkronizálva!")
+                    st.rerun()
+                else:
+                    st.error(f"API Hiba: {response.status_code}")
+
+            st.divider()
             st.subheader("🛠️ Kézi Eredmény Megadás (Bírói pult)")
             aktiv_meccsek = {m_id: f"{m['hazai']} - {m['vendeg']} ({m['kezdes']})" for m_id, m in data["meccsek"].items()}
             
             if aktiv_meccsek:
                 admin_meccs = st.selectbox("Válaszd ki a meccset:", options=list(aktiv_meccsek.keys()), format_func=lambda x: aktiv_meccsek[x])
-                
-                # BUGFIX: Itt is bevezetve a dinamikus kulcsokat, így ha váltod a meccset, frissül a widget és nem ragad be az előző adat!
                 m_adat = data["meccsek"][admin_meccs]
                 def_h = m_adat["eredmeny_hazai"] if m_adat["eredmeny_hazai"] is not None else 0
                 def_v = m_adat["eredmeny_vendeg"] if m_adat["eredmeny_vendeg"] is not None else 0
