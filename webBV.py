@@ -5,6 +5,7 @@ import os
 import hashlib
 import pandas as pd
 import requests
+from streamlit_autorefresh import st_autorefresh
 
 # ---------------------------------------------------------
 # BEÁLLÍTÁSOK
@@ -12,14 +13,23 @@ import requests
 st.set_page_config(page_title="VB Tippjáték 2026", page_icon="⚽", layout="wide")
 
 API_KEY = "61523fa2549e43399c32d65544a160bb"
-DATA_FILE = "tippjatek_2026_web_adatok.json"
+DATA_FILE = "tippjatek_2026_admin_adatok.json"
+
+def hash_password(password):
+    return hashlib.sha256(password.encode()).hexdigest()
 
 default_data = {
     "meccsek": {}, 
-    "jatekosok": {}, 
-    "regisztralt_nevek": [], 
+    "jatekosok": {
+        "Admin": {
+            "pw_hash": hash_password("admin123"), # ALAPÉRTELMEZETT ADMIN JELSZÓ
+            "tippek": {}, "bonusz_gyoztes": "", "bonusz_golkiraly": ""
+        }
+    }, 
+    "regisztralt_nevek": ["Admin"], 
     "torna_gyoztese": "", 
-    "torna_golkiralya": "" 
+    "torna_golkiralya": "",
+    "last_api_update": "2000-01-01 00:00:00" # Időbélyeg az okos API lekéréshez
 }
 
 # ---------------------------------------------------------
@@ -33,15 +43,13 @@ def load_data():
                 data["regisztralt_nevek"] = list(data["jatekosok"].keys())
             if "torna_gyoztese" not in data: data["torna_gyoztese"] = ""
             if "torna_golkiralya" not in data: data["torna_golkiralya"] = ""
+            if "last_api_update" not in data: data["last_api_update"] = "2000-01-01 00:00:00"
             return data
     return default_data
 
 def save_data(data):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4, ensure_ascii=False)
-
-def hash_password(password):
-    return hashlib.sha256(password.encode()).hexdigest()
 
 def calculate_points(tipp_h, tipp_v, teny_h, teny_v):
     if teny_h is None or teny_v is None or tipp_h is None or tipp_v is None:
@@ -68,7 +76,46 @@ def torna_elkezdodott(data):
         return True
     return False
 
-# Munkamenet (Session) állapot inicializálása
+def frissit_api_okosan(data):
+    """Csak akkor tölt le, ha eltelt 1 perc, így védi az API limitet!"""
+    if not API_KEY.strip(): return False
+    
+    most = datetime.datetime.now()
+    utolso_frissites = datetime.datetime.strptime(data["last_api_update"], "%Y-%m-%d %H:%M:%S")
+    
+    # Ha eltelt 60 másodperc az utolsó letöltés óta
+    if (most - utolso_frissites).total_seconds() >= 60:
+        try:
+            response = requests.get("https://api.football-data.org/v4/competitions/WC/matches", headers={"X-Auth-Token": API_KEY})
+            if response.status_code == 200:
+                matches_data = response.json().get("matches", [])
+                for m in matches_data:
+                    m_id = str(m["id"])
+                    hazai = m.get("homeTeam", {}).get("name") or "TBD"
+                    vendeg = m.get("awayTeam", {}).get("name") or "TBD"
+                    dt = datetime.datetime.strptime(m["utcDate"], "%Y-%m-%dT%H:%M:%SZ")
+                    kezdes_str = dt.strftime("%Y-%m-%d %H:%M")
+                    score = m.get("score", {}).get("fullTime", {})
+                    
+                    if m_id not in data["meccsek"]:
+                        data["meccsek"][m_id] = {"hazai": hazai, "vendeg": vendeg, "kezdes": kezdes_str, "eredmeny_hazai": score.get("home"), "eredmeny_vendeg": score.get("away")}
+                    else:
+                        data["meccsek"][m_id]["hazai"] = hazai
+                        data["meccsek"][m_id]["vendeg"] = vendeg
+                        data["meccsek"][m_id]["kezdes"] = kezdes_str
+                        if score.get("home") is not None:
+                            data["meccsek"][m_id]["eredmeny_hazai"] = score.get("home")
+                            data["meccsek"][m_id]["eredmeny_vendeg"] = score.get("away")
+                
+                # Sikeres frissítés esetén elmentjük a jelenlegi időpontot
+                data["last_api_update"] = most.strftime("%Y-%m-%d %H:%M:%S")
+                save_data(data)
+                return True
+        except Exception:
+            pass
+    return False
+
+# Munkamenet állapot
 if 'user' not in st.session_state:
     st.session_state['user'] = None
 
@@ -84,6 +131,7 @@ if st.session_state['user'] is None:
     tab_login, tab_reg = st.tabs(["🔑 Bejelentkezés", "📝 Regisztráció"])
     
     with tab_login:
+        st.info("💡 **Adminisztrátori belépés:** Felhasználónév: `Admin`, Jelszó: `admin123`")
         with st.form("login_form"):
             login_user = st.text_input("Felhasználónév")
             login_pw = st.text_input("Jelszó", type="password")
@@ -104,7 +152,7 @@ if st.session_state['user'] is None:
             reg_pw = st.text_input("Új Jelszó", type="password")
             reg_submitted = st.form_submit_button("Regisztráció")
             if reg_submitted:
-                if reg_user in data["jatekosok"]:
+                if reg_user.lower() == "admin" or reg_user in data["jatekosok"]:
                     st.error("Ez a név már foglalt!")
                 elif not reg_user or not reg_pw:
                     st.error("Minden mezőt ki kell tölteni!")
@@ -121,6 +169,13 @@ if st.session_state['user'] is None:
 # UI: FŐ ALKALMAZÁS (BELÉPVE)
 # ---------------------------------------------------------
 else:
+    # ⏱️ AUTOMATIKUS FRISSÍTÉS MINDEN BEJELENTKEZETT FELHASZNÁLÓNAK (60 mp)
+    st_autorefresh(interval=60000, key="api_refresh")
+    
+    # A háttérben megpróbálja okosan frissíteni az adatokat
+    if frissit_api_okosan(data):
+        st.toast('🔄 Meccsek eredményei frissítve!', icon='⚽')
+    
     active_user = st.session_state['user']
     
     # Felső sáv
@@ -134,7 +189,7 @@ else:
             
     # Fülek létrehozása
     tab_sajat, tab_rivalisok, tab_ranglista, tab_admin = st.tabs([
-        "📝 Saját Tippjeim", "👀 Riválisok Tippjei", "📊 Ranglista", "⚙️ Eredmények & Admin"
+        "📝 Saját Tippjeim", "👀 Riválisok Tippjei", "📊 Ranglista", "⚙️ Admin & Vezérlés"
     ])
     
     # --- 1. FÜL: SAJÁT TIPPEK ---
@@ -170,9 +225,8 @@ else:
         st.subheader("⚽ Meccsek Tippelése")
         
         if not data["meccsek"]:
-            st.info("Még nincsenek meccsek a rendszerben. Az Admin fülön szinkronizáld az adatokat!")
+            st.info("Még nincsenek meccsek a rendszerben. Várjuk a sorsolást!")
         else:
-            # Csak a még le nem játszott meccseket engedjük kiválasztani tippeléshez
             tippelheto_meccsek = {
                 m_id: f"{m['hazai']} - {m['vendeg']} ({m['kezdes']})" 
                 for m_id, m in data["meccsek"].items() 
@@ -183,7 +237,6 @@ else:
                 with st.form("tipp_form"):
                     valasztott_meccs = st.selectbox("Válassz meccset a tippeléshez:", options=list(tippelheto_meccsek.keys()), format_func=lambda x: tippelheto_meccsek[x])
                     
-                    # Előző tipp betöltése, ha van
                     elozo_h, elozo_v = 0, 0
                     if valasztott_meccs in data["jatekosok"][active_user]["tippek"]:
                         elozo_h = data["jatekosok"][active_user]["tippek"][valasztott_meccs]["hazai"]
@@ -291,82 +344,52 @@ else:
             })
             
         df_ranglista = pd.DataFrame(eredmenyek).sort_values(by="Összesen", ascending=False).reset_index(drop=True)
-        df_ranglista.index = df_ranglista.index + 1 # Helyezés 1-től
+        df_ranglista.index = df_ranglista.index + 1
         
         st.dataframe(df_ranglista, use_container_width=True)
 
-    # --- 4. FÜL: ADMIN ÉS EREDMÉNYEK ---
+    # --- 4. FÜL: ADMIN ÉS EREDMÉNYEK (CSAK ADMIN LÁTHATJA) ---
     with tab_admin:
-        st.header("⚙️ Eredmények Kezelése")
-        
-        if st.button("🌍 Online Adatok Szinkronizálása (API)"):
-            try:
-                response = requests.get("https://api.football-data.org/v4/competitions/WC/matches", headers={"X-Auth-Token": API_KEY})
-                if response.status_code == 200:
-                    matches_data = response.json().get("matches", [])
-                    if not matches_data:
-                        st.info("Az API jelenleg üres a VB-hez (még nincs sorsolás).")
-                    else:
-                        for m in matches_data:
-                            m_id = str(m["id"])
-                            hazai = m.get("homeTeam", {}).get("name") or "TBD"
-                            vendeg = m.get("awayTeam", {}).get("name") or "TBD"
-                            dt = datetime.datetime.strptime(m["utcDate"], "%Y-%m-%dT%H:%M:%SZ")
-                            kezdes_str = dt.strftime("%Y-%m-%d %H:%M")
-                            score = m.get("score", {}).get("fullTime", {})
-                            
-                            if m_id not in data["meccsek"]:
-                                data["meccsek"][m_id] = {"hazai": hazai, "vendeg": vendeg, "kezdes": kezdes_str, "eredmeny_hazai": score.get("home"), "eredmeny_vendeg": score.get("away")}
-                            else:
-                                data["meccsek"][m_id]["hazai"] = hazai
-                                data["meccsek"][m_id]["vendeg"] = vendeg
-                                data["meccsek"][m_id]["kezdes"] = kezdes_str
-                                if score.get("home") is not None:
-                                    data["meccsek"][m_id]["eredmeny_hazai"] = score.get("home")
-                                    data["meccsek"][m_id]["eredmeny_vendeg"] = score.get("away")
+        if active_user == "Admin":
+            st.header("⚙️ Adminisztrációs Vezérlőpult")
+            st.info("Itt tudod kézzel felülírni a meccseket, ha az API esetleg késne, illetve beállítani a torna végső győzteseit a bónuszokhoz.")
+            
+            st.subheader("🛠️ Kézi Eredmény Megadás (Bírói pult)")
+            aktiv_meccsek = {m_id: f"{m['hazai']} - {m['vendeg']} ({m['kezdes']})" for m_id, m in data["meccsek"].items()}
+            
+            if aktiv_meccsek:
+                with st.form("manual_result_form"):
+                    admin_meccs = st.selectbox("Válaszd ki a meccset:", options=list(aktiv_meccsek.keys()), format_func=lambda x: aktiv_meccsek[x])
+                    col_a1, col_a2 = st.columns(2)
+                    with col_a1:
+                        admin_h = st.number_input("Tényleges Hazai gól:", min_value=0, max_value=20, step=1)
+                    with col_a2:
+                        admin_v = st.number_input("Tényleges Vendég gól:", min_value=0, max_value=20, step=1)
+                        
+                    if st.form_submit_button("Lefújás & Eredmény Rögzítése"):
+                        data["meccsek"][admin_meccs]["eredmeny_hazai"] = admin_h
+                        data["meccsek"][admin_meccs]["eredmeny_vendeg"] = admin_v
                         save_data(data)
-                        st.success("Meccsek és eredmények szinkronizálva az API-val!")
+                        st.success("Eredmény rögzítve! A meccs lezárult, a tippek publikussá váltak.")
                         st.rerun()
-                else:
-                    st.error(f"API hiba. Kód: {response.status_code}")
-            except Exception as e:
-                st.error(f"Hiba történt: {e}")
+            else:
+                st.warning("Nincs aktív meccs az adatbázisban.")
 
-        st.divider()
-        st.subheader("🛠️ Kézi Eredmény Megadás (Teszt / Bírói pult)")
-        
-        aktiv_meccsek = {m_id: f"{m['hazai']} - {m['vendeg']} ({m['kezdes']})" for m_id, m in data["meccsek"].items()}
-        
-        if aktiv_meccsek:
-            with st.form("manual_result_form"):
-                admin_meccs = st.selectbox("Válaszd ki a meccset:", options=list(aktiv_meccsek.keys()), format_func=lambda x: aktiv_meccsek[x])
-                col_a1, col_a2 = st.columns(2)
-                with col_a1:
-                    admin_h = st.number_input("Tényleges Hazai gól:", min_value=0, max_value=20, step=1)
-                with col_a2:
-                    admin_v = st.number_input("Tényleges Vendég gól:", min_value=0, max_value=20, step=1)
-                    
-                if st.form_submit_button("Lefújás & Eredmény Rögzítése"):
-                    data["meccsek"][admin_meccs]["eredmeny_hazai"] = admin_h
-                    data["meccsek"][admin_meccs]["eredmeny_vendeg"] = admin_v
+            st.divider()
+            st.subheader("🏁 Torna Végeredménye (Bónuszok Kiosztásához)")
+            with st.form("tournament_end_form"):
+                col_v1, col_v2 = st.columns(2)
+                with col_v1:
+                    veg_gyoztes = st.text_input("Valós Győztes:", value=data.get("torna_gyoztese", ""))
+                with col_v2:
+                    veg_golkiraly = st.text_input("Valós Gólkirály:", value=data.get("torna_golkiralya", ""))
+                
+                if st.form_submit_button("Aranylabda Átadása (Bónuszok Kiosztása)"):
+                    data["torna_gyoztese"] = veg_gyoztes.strip()
+                    data["torna_golkiralya"] = veg_golkiraly.strip()
                     save_data(data)
-                    st.success("Eredmény rögzítve! A meccs lezárult, a tippek publikussá váltak.")
+                    st.success("A torna végeredménye rögzítve! Bónuszok kiosztva, titkos tippek leleplezve.")
                     st.rerun()
         else:
-            st.info("Előbb szinkronizáld be a meccseket!")
-
-        st.divider()
-        st.subheader("🏁 Torna Végeredménye (Bónuszok Kiosztásához)")
-        with st.form("tournament_end_form"):
-            col_v1, col_v2 = st.columns(2)
-            with col_v1:
-                veg_gyoztes = st.text_input("Valós Győztes:", value=data.get("torna_gyoztese", ""))
-            with col_v2:
-                veg_golkiraly = st.text_input("Valós Gólkirály:", value=data.get("torna_golkiralya", ""))
-            
-            if st.form_submit_button("Aranylabda Átadása (Lezárás)"):
-                data["torna_gyoztese"] = veg_gyoztes.strip()
-                data["torna_golkiralya"] = veg_golkiraly.strip()
-                save_data(data)
-                st.success("A torna végeredménye rögzítve! Bónuszok kiosztva, titkos tippek leleplezve.")
-                st.rerun()
+            st.error("⛔ Nincs jogosultságod megtekinteni ezt az oldalt! Ezt a felületet kizárólag az Adminisztrátor érheti el.")
+            st.image("https://media.giphy.com/media/xT5LMVxoZ2xU4O0T6s/giphy.gif", width=300) # Vicces piros lap gif
