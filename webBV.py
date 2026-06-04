@@ -76,6 +76,34 @@ def torna_elkezdodott(data):
         return True
     return False
 
+def feldolgoz_meccsek_api(matches_data, data):
+    """Közös funkció az API válasz feldolgozására és az időzóna javítására (+2 óra)"""
+    for m in matches_data:
+        m_id = str(m["id"])
+        hazai = m.get("homeTeam", {}).get("name") or "TBD"
+        vendeg = m.get("awayTeam", {}).get("name") or "TBD"
+        
+        # Időzóna javítása: UTC-ből Közép-európai idő (+2 óra hozzáadása)
+        dt = datetime.datetime.strptime(m["utcDate"], "%Y-%m-%dT%H:%M:%SZ")
+        dt_local = dt + datetime.timedelta(hours=2)
+        kezdes_str = dt_local.strftime("%Y-%m-%d %H:%M")
+        
+        score = m.get("score", {}).get("fullTime", {})
+        
+        if m_id not in data["meccsek"]:
+            data["meccsek"][m_id] = {
+                "hazai": hazai, "vendeg": vendeg, "kezdes": kezdes_str, 
+                "eredmeny_hazai": score.get("home"), "eredmeny_vendeg": score.get("away")
+            }
+        else:
+            data["meccsek"][m_id]["hazai"] = hazai
+            data["meccsek"][m_id]["vendeg"] = vendeg
+            data["meccsek"][m_id]["kezdes"] = kezdes_str # Frissíti a helyes időpontra
+            if score.get("home") is not None:
+                data["meccsek"][m_id]["eredmeny_hazai"] = score.get("home")
+                data["meccsek"][m_id]["eredmeny_vendeg"] = score.get("away")
+    return data
+
 def frissit_api_okosan(data):
     if not API_KEY.strip(): return False
     most = datetime.datetime.now()
@@ -86,23 +114,7 @@ def frissit_api_okosan(data):
             response = requests.get("https://api.football-data.org/v4/competitions/WC/matches", headers={"X-Auth-Token": API_KEY})
             if response.status_code == 200:
                 matches_data = response.json().get("matches", [])
-                for m in matches_data:
-                    m_id = str(m["id"])
-                    hazai = m.get("homeTeam", {}).get("name") or "TBD"
-                    vendeg = m.get("awayTeam", {}).get("name") or "TBD"
-                    dt = datetime.datetime.strptime(m["utcDate"], "%Y-%m-%dT%H:%M:%SZ")
-                    kezdes_str = dt.strftime("%Y-%m-%d %H:%M")
-                    score = m.get("score", {}).get("fullTime", {})
-                    
-                    if m_id not in data["meccsek"]:
-                        data["meccsek"][m_id] = {"hazai": hazai, "vendeg": vendeg, "kezdes": kezdes_str, "eredmeny_hazai": score.get("home"), "eredmeny_vendeg": score.get("away")}
-                    else:
-                        data["meccsek"][m_id]["hazai"] = hazai
-                        data["meccsek"][m_id]["vendeg"] = vendeg
-                        data["meccsek"][m_id]["kezdes"] = kezdes_str
-                        if score.get("home") is not None:
-                            data["meccsek"][m_id]["eredmeny_hazai"] = score.get("home")
-                            data["meccsek"][m_id]["eredmeny_vendeg"] = score.get("away")
+                data = feldolgoz_meccsek_api(matches_data, data)
                 
                 data["last_api_update"] = most.strftime("%Y-%m-%d %H:%M:%S")
                 save_data(data)
@@ -164,20 +176,19 @@ if st.session_state['user'] is None:
 # UI: FŐ ALKALMAZÁS (BELÉPVE)
 # ---------------------------------------------------------
 else:
-    # ⏱️ AUTOMATIKUS FRISSÍTÉS MINDEN BEJELENTKEZETT FELHASZNÁLÓNAK (60 mp)
+    # ⏱️ AUTOMATIKUS FRISSÍTÉS (60 mp)
     st_autorefresh(interval=60000, key="api_refresh")
     
     if frissit_api_okosan(data):
-        st.toast('🔄 Meccsek eredményei frissítve az API-ból!', icon='⚽')
+        st.toast('🔄 Eredmények frissítve az API-ból!', icon='⚽')
     
     active_user = st.session_state['user']
     
-    # Felső sáv és Utolsó frissítés kijelzése
+    # Felső sáv
     col1, col2 = st.columns([4, 1])
     with col1:
         st.title(f"⚽ VB Tippjáték - Üdv, {active_user}! 🏆")
         
-        # UTOLSÓ FRISSÍTÉS KIJELZÉSE MINDENKINEK
         utolso_friss = data.get('last_api_update', '2000-01-01 00:00:00')
         ha_nincs = "Még nem történt letöltés" if "2000" in utolso_friss else utolso_friss
         st.caption(f"🔄 **Eredmények utoljára szinkronizálva:** {ha_nincs}")
@@ -187,7 +198,6 @@ else:
             st.session_state['user'] = None
             st.rerun()
             
-    # Fülek létrehozása
     tab_sajat, tab_rivalisok, tab_ranglista, tab_admin = st.tabs([
         "📝 Saját Tippjeim", "👀 Riválisok Tippjei", "📊 Ranglista", "⚙️ Admin & Vezérlés"
     ])
@@ -197,7 +207,6 @@ else:
         st.header("Saját tippek leadása")
         elkezdodott = torna_elkezdodott(data)
         
-        # BÓNUSZ SZEKCIÓ
         st.subheader("🏆 Bónusz kérdések (10 - 10 pont)")
         if elkezdodott:
             st.warning("🔒 A torna már elkezdődött, a bónusz tippek lezárultak!")
@@ -220,8 +229,6 @@ else:
                     st.rerun()
                     
         st.divider()
-        
-        # MECCSEK TIPPELÉSE
         st.subheader("⚽ Meccsek Tippelése")
         
         if not data["meccsek"]:
@@ -234,14 +241,15 @@ else:
             }
             
             if tippelheto_meccsek:
+                # 🛠️ JAVÍTÁS: A selectbox kikerült az űrlapból, így a váltás azonnal frissíti a mezőket!
+                valasztott_meccs = st.selectbox("Válassz meccset a tippeléshez:", options=list(tippelheto_meccsek.keys()), format_func=lambda x: tippelheto_meccsek[x])
+                
+                elozo_h, elozo_v = 0, 0
+                if valasztott_meccs in data["jatekosok"][active_user]["tippek"]:
+                    elozo_h = data["jatekosok"][active_user]["tippek"][valasztott_meccs]["hazai"]
+                    elozo_v = data["jatekosok"][active_user]["tippek"][valasztott_meccs]["vendeg"]
+
                 with st.form("tipp_form"):
-                    valasztott_meccs = st.selectbox("Válassz meccset a tippeléshez:", options=list(tippelheto_meccsek.keys()), format_func=lambda x: tippelheto_meccsek[x])
-                    
-                    elozo_h, elozo_v = 0, 0
-                    if valasztott_meccs in data["jatekosok"][active_user]["tippek"]:
-                        elozo_h = data["jatekosok"][active_user]["tippek"][valasztott_meccs]["hazai"]
-                        elozo_v = data["jatekosok"][active_user]["tippek"][valasztott_meccs]["vendeg"]
-                        
                     col_t1, col_t2 = st.columns(2)
                     with col_t1:
                         tipp_h = st.number_input("Hazai gólok:", min_value=0, max_value=20, value=elozo_h, step=1)
@@ -353,14 +361,12 @@ else:
             st.header("⚙️ Adminisztrációs Vezérlőpult")
             st.info("Itt tudod menedzselni a meccseket, a bónuszokat, a felhasználókat és a biztonsági mentéseket.")
             
-            # --- ÚJ: REGISZTRÁLT FELHASZNÁLÓK LISTÁJA ---
             st.subheader("👥 Regisztrált Játékosok")
             regisztraltak = data.get("regisztralt_nevek", [])
             st.write(f"Összesen {len(regisztraltak)} játékos van a rendszerben.")
             st.code(", ".join(regisztraltak))
             st.divider()
 
-            # --- ÚJ: EXPORT / IMPORT FUNKCIÓK ---
             st.subheader("💾 Adatbázis Biztonsági Mentés (Export / Import)")
             col_exp, col_imp = st.columns(2)
             
@@ -394,12 +400,26 @@ else:
                             
             st.divider()
             
+            st.subheader("🌍 Kézi API Szinkronizáció")
+            if st.button("Meccsek lekérése azonnal"):
+                response = requests.get("https://api.football-data.org/v4/competitions/WC/matches", headers={"X-Auth-Token": API_KEY})
+                if response.status_code == 200:
+                    data = feldolgoz_meccsek_api(response.json().get("matches", []), data)
+                    data["last_api_update"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    save_data(data)
+                    st.success("Meccsek sikeresen szinkronizálva!")
+                    st.rerun()
+                else:
+                    st.error(f"API Hiba: {response.status_code}")
+
+            st.divider()
             st.subheader("🛠️ Kézi Eredmény Megadás (Bírói pult)")
             aktiv_meccsek = {m_id: f"{m['hazai']} - {m['vendeg']} ({m['kezdes']})" for m_id, m in data["meccsek"].items()}
             
             if aktiv_meccsek:
+                # 🛠️ JAVÍTÁS ITT IS: A selectbox kikerült az űrlapból
+                admin_meccs = st.selectbox("Válaszd ki a meccset:", options=list(aktiv_meccsek.keys()), format_func=lambda x: aktiv_meccsek[x])
                 with st.form("manual_result_form"):
-                    admin_meccs = st.selectbox("Válaszd ki a meccset:", options=list(aktiv_meccsek.keys()), format_func=lambda x: aktiv_meccsek[x])
                     col_a1, col_a2 = st.columns(2)
                     with col_a1:
                         admin_h = st.number_input("Tényleges Hazai gól:", min_value=0, max_value=20, step=1)
